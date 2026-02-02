@@ -1,0 +1,209 @@
+name: DORA Metrics Sender
+
+on:
+  workflow_call:
+    inputs:
+      event_type:
+        required: true
+        type: string
+        description: 'deployment ou failure'
+      
+      service:
+        required: true
+        type: string
+      env:
+        required: true
+        type: string
+      team:
+        required: true
+        type: string
+      version:
+        required: true
+        type: string
+      
+      started_at:
+        required: true
+        type: string
+        description: 'Timestamp em Nanosegundos'
+      finished_at:
+        required: false
+        type: string
+        default: ''
+        
+      repo_url:
+        required: true
+        type: string
+      commit_sha:
+        required: true
+        type: string
+
+    secrets:
+      DD_API_KEY:
+        required: true
+
+jobs:
+  send-metric:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Send to Datadog
+        env:
+          DD_API_KEY: ${{ secrets.DD_API_KEY }}
+          DD_SITE: api.us5.datadoghq.com
+        run: |
+          # --- 1. Validação de Inputs ---
+          
+          SERVICE="${{ inputs.service }}"
+          ENV="${{ inputs.env }}"
+          TEAM="${{ inputs.team }}"
+          VERSION="${{ inputs.version }}"
+          REPO_URL="${{ inputs.repo_url }}"
+          COMMIT_SHA="${{ inputs.commit_sha }}"
+          EVENT_TYPE="${{ inputs.event_type }}"
+          
+          # Debug: Mostrar valores recebidos
+          echo "DEBUG - Valores recebidos:"
+          echo "SERVICE: '$SERVICE'"
+          echo "ENV: '$ENV'"
+          echo "TEAM: '$TEAM'"
+          echo "VERSION: '$VERSION'"
+          echo "REPO_URL: '$REPO_URL'"
+          echo "COMMIT_SHA: '$COMMIT_SHA'"
+          echo "EVENT_TYPE: '$EVENT_TYPE'"
+          
+          # Tratamento do STARTED_AT
+          STARTED_AT="${{ inputs.started_at }}"
+          echo "DEBUG - STARTED_AT bruto: '$STARTED_AT'"
+          # Remover possíveis aspas extras
+          STARTED_AT=$(echo "$STARTED_AT" | sed 's/^"//;s/"$//')
+          if [ -z "$STARTED_AT" ] || [ "$STARTED_AT" = "''" ] || [ "$STARTED_AT" = "\"\"" ]; then
+             echo "AVISO: started_at veio vazio. Usando tempo atual."
+             STARTED_AT=$(date +%s%N)
+          fi
+
+          # Tratamento do FINISHED_AT
+          FINISHED_AT="${{ inputs.finished_at }}"
+          echo "DEBUG - FINISHED_AT bruto: '$FINISHED_AT'"
+          # Remover possíveis aspas extras
+          FINISHED_AT=$(echo "$FINISHED_AT" | sed 's/^"//;s/"$//')
+          if [ -z "$FINISHED_AT" ] || [ "$FINISHED_AT" = "''" ] || [ "$FINISHED_AT" = "\"\"" ]; then
+            FINISHED_AT=$(date +%s%N)
+          fi
+
+          # Verificar se são números válidos
+          if ! [[ "$STARTED_AT" =~ ^[0-9]+$ ]]; then
+            echo "ERRO: started_at não é um número válido: $STARTED_AT"
+            exit 1
+          fi
+          
+          if ! [[ "$FINISHED_AT" =~ ^[0-9]+$ ]]; then
+            echo "ERRO: finished_at não é um número válido: $FINISHED_AT"
+            exit 1
+          fi
+
+          # Segurança da API Key
+          if [ -z "$DD_API_KEY" ]; then
+            echo "DD_API_KEY não detectada. Pulando."
+            exit 0
+          fi
+
+          echo "Enviando DORA Metric: $EVENT_TYPE"
+          echo "Service: $SERVICE | Version: $VERSION"
+          echo "Started At: $STARTED_AT | Finished At: $FINISHED_AT"
+
+          # --- 2. Usando arquivo temporário (mais seguro que heredoc) ---
+          
+          if [ "$EVENT_TYPE" = "deployment" ]; then
+            echo "Enviando deployment para Datadog..."
+            
+            # Criar arquivo JSON temporário
+            PAYLOAD_FILE=$(mktemp)
+            cat > "$PAYLOAD_FILE" <<JSON
+{
+  "data": {
+    "type": "dora_deployment",
+    "attributes": {
+      "service": "$SERVICE",
+      "env": "$ENV",
+      "version": "$VERSION",
+      "team": "$TEAM",
+      "started_at": $STARTED_AT,
+      "finished_at": $FINISHED_AT,
+      "git": {
+        "commit_sha": "$COMMIT_SHA",
+        "repository_url": "$REPO_URL"
+      }
+    }
+  }
+}
+JSON
+            
+            echo "Conteúdo do JSON:"
+            cat "$PAYLOAD_FILE"
+            echo ""
+            
+            curl -X POST "https://${DD_SITE}/api/v2/dora/deployment" \
+              -H "DD-API-KEY: ${DD_API_KEY}" \
+              -H "Content-Type: application/json" \
+              --data-binary @"$PAYLOAD_FILE"
+            
+            CURL_EXIT_CODE=$?
+            
+            # Limpar arquivo temporário
+            rm -f "$PAYLOAD_FILE"
+            
+            if [ $CURL_EXIT_CODE -ne 0 ]; then
+              echo "ERRO: Falha ao enviar deployment (curl exit code: $CURL_EXIT_CODE)"
+              exit 1
+            fi
+            
+          elif [ "$EVENT_TYPE" = "failure" ]; then
+            echo "Enviando failure para Datadog..."
+            
+            # Criar arquivo JSON temporário
+            PAYLOAD_FILE=$(mktemp)
+            cat > "$PAYLOAD_FILE" <<JSON
+{
+  "data": {
+    "type": "dora_failure",
+    "attributes": {
+      "service": "$SERVICE",
+      "env": "$ENV",
+      "team": "$TEAM",
+      "version": "$VERSION",
+      "started_at": $STARTED_AT,
+      "finished_at": $FINISHED_AT,
+      "git": {
+        "commit_sha": "$COMMIT_SHA",
+        "repository_url": "$REPO_URL"
+      }
+    }
+  }
+}
+JSON
+            
+            echo "Conteúdo do JSON:"
+            cat "$PAYLOAD_FILE"
+            echo ""
+            
+            curl -X POST "https://${DD_SITE}/api/v2/dora/failure" \
+              -H "DD-API-KEY: ${DD_API_KEY}" \
+              -H "Content-Type: application/json" \
+              --data-binary @"$PAYLOAD_FILE"
+            
+            CURL_EXIT_CODE=$?
+            
+            # Limpar arquivo temporário
+            rm -f "$PAYLOAD_FILE"
+            
+            if [ $CURL_EXIT_CODE -ne 0 ]; then
+              echo "ERRO: Falha ao enviar failure (curl exit code: $CURL_EXIT_CODE)"
+              exit 1
+            fi
+            
+          else
+            echo "ERRO: Tipo de evento desconhecido: $EVENT_TYPE"
+            echo "Tipos válidos: deployment ou failure"
+            exit 1
+          fi
+          
+          echo "Métrica DORA enviada com sucesso!"
